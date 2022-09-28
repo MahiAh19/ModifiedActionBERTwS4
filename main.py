@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from dataloader import BiLSTMDataset, TransformerDataset
 from utils import str2bool, print_and_log, setup_logs_file
-from utils import compute_validation_metrics
+from utils import compute_validation_test_metrics
 
 
 from model import BiLSTM, Transformer, MyS4
@@ -21,6 +21,9 @@ python3 main.py --mode train --expt_dir ./results_log  --expt_name BERT --model 
 --num_layers 1 --batch_size 256 --epochs 300 --gpu_id 1 --opt_lvl 1  --num_workers 4 --lr 1e-4
 
 Test:
+python3 main.py --mode test --expt_dir ./testresults_log  --expt_name BERT --model bert \
+--data_dir ~/Datasets/UCF_101/processed_fps_1_res18 --run_name res18_1fps_lyr_1_bs_256_lr_1e4 \
+--num_layers 1 --batch_size 256 --epochs 300 --gpu_id 1 --opt_lvl 1  --num_workers 4 --lr 1e-4
 """
 
 
@@ -76,8 +79,6 @@ def main():
                         help='validation set size for evaluating accuracy', default=2000)
     parser.add_argument('--use_val',        type=str2bool,
                         help='use validation set & metrics', default='true')
-    parser.add_argument('--val_size',       type=int,
-                        help='validation set size for evaluating accuracy', default=2000)
 
     # GPU params
     parser.add_argument('--gpu_id',         type=int,
@@ -297,8 +298,8 @@ def main():
     # TODO: Test/Inference
     elif args.mode == 'test':
 
-        # Use the same max video length as in the training dataset
-        dataset_configs['max_video_len'] = max_video_len
+        # Dataset & Dataloader
+        dataset_configs, Dataset = init_dataset_configs(args.model, args)
 
         test_dataset = Dataset(os.path.join(args.data_dir, 'test.json'),
                                os.path.join(args.data_dir, 'test.npy'),
@@ -307,16 +308,103 @@ def main():
         test_loader = DataLoader(
             test_dataset, batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers)
 
-        # Total validation set size
-        val_total_size = val_dataset.__len__()
-        log_msg = 'Validation Data Size: {}\n'.format(val_total_size)
+        # Total Test set size
+        test_total_size = test_dataset.__len__()
+        log_msg = 'Train Data Size: {}\n'.format(test_dataset.__len__())
 
         # Min of the total & subset size
-        val_size = min(val_total_size, args.val_size)
-        log_msg += 'Validation Accuracy is computed using {} samples. See --val_size\n'.format(
-            val_size)
+        test_size = min(test_total_size, args.val_size)
+        log_msg += 'Test Accuracy is computed using {} samples. See --val_size\n'.format(
+            test_size)
+        print(log_msg)
 
-        print_and_log(log_msg, log_file)
+        # Build Model
+        model_configs, Model = init_model_configs(
+            args.model, args, input_dim, max_video_len)
+
+        model = Model(model_configs, device)
+        model.to(device)
+
+        # Loss & Optimizer
+        criterion = nn.CrossEntropyLoss()
+
+        # Step & Epoch
+        start_epoch = 1
+        curr_step = 1
+
+        steps_per_epoch = len(test_loader)
+        start_time = time()
+
+        for epoch in range(start_epoch, start_epoch + n_epochs):
+            for batch_data in train_loader:
+                # Load to device, for the list of batch tensors
+                batch_data = [d.to(device) for d in batch_data]
+                inputs, label = batch_data[:-1], batch_data[-1]
+
+                # Forward Pass
+                label_logits = model(*inputs)
+
+                # Compute Loss
+                loss = criterion(label_logits, label)
+
+                # Print Results - Loss value & Validation Accuracy
+                if curr_step % args.log_interval == 0 or curr_step == 1:
+
+                    # Test set accuracy
+                    test_metrics = compute_validation_test_metrics(
+                        model, test_loader, device, test_size)
+
+                    # # Reset the mode to training
+                    # model.train()
+
+                    log_msg = 'Test Accuracy: {:.2f} %  || Test Loss: {:.4f}'.format(
+                        test_metrics['accuracy'], test_metrics['loss'])
+
+                    #print_and_log(log_msg, log_file)
+                    print(log_msg)
+
+                    # Add summaries to TensorBoard
+                    writer.add_scalar(
+                        'Test/Accuracy', test_metrics['accuracy'], curr_step)
+                    writer.add_scalar(
+                        'Test/Loss', test_metrics['loss'], curr_step)
+
+                    # Add summaries to TensorBoard
+                    writer.add_scalar('Test/Loss', loss.item(), curr_step)
+
+                    # Compute elapsed & remaining time for training to complete
+                    time_elapsed = (time() - start_time) / 3600
+                    # total time = time_per_step * steps_per_epoch * total_epochs
+                    total_time = (time_elapsed / curr_step) * \
+                        steps_per_epoch * n_epochs
+                    time_left = total_time - time_elapsed
+
+                    log_msg = 'Epoch [{}/{}], Step [{}/{}], Loss: {:.4f} | time elapsed: {:.2f}h | time left: {:.2f}h'.format(
+                        epoch, n_epochs, curr_step, steps_per_epoch, loss.item(), time_elapsed, time_left)
+
+                    #print_and_log(log_msg, log_file)
+                    print(log_msg)
+
+                # # Save the model
+                # if curr_step % args.save_interval == 0:
+                #     save_path = os.path.join(
+                #         log_dir, 'model_' + str(curr_step) + '.pth')
+
+                #     state_dict = {'model_state_dict': model.state_dict(),
+                #                   'optimizer_state_dict': optimizer.state_dict(),
+                #                   'curr_step': curr_step, 'loss': loss, 'epoch': epoch}
+
+                #     torch.save(state_dict, save_path)
+                #     # torch.save(model.state_dict(), save_path)
+
+                #     log_msg = 'Saving the model at the {} step to directory:{}'.format(
+                #         curr_step, log_dir)
+                #     print_and_log(log_msg, log_file)
+
+                curr_step += 1
+
+        # writer.close()
+        # log_file.close()
 
 
 def init_dataset_configs(model_name, args):
