@@ -20,10 +20,10 @@ python3 main.py --mode train --expt_dir ./results_log  --expt_name BERT --model 
 --data_dir ~/Datasets/UCF_101/processed_fps_1_res18 --run_name res18_1fps_lyr_1_bs_256_lr_1e4 \
 --num_layers 1 --batch_size 256 --epochs 300 --gpu_id 1 --opt_lvl 1  --num_workers 4 --lr 1e-4
 
-Test:
-python3 main.py --mode test --expt_dir ./testresults_log  --expt_name BERT --model bert \
+Train + Val + Test:
+python3 main.py --mode test --expt_dir ./results_log  --expt_name BERT --model bert \
 --data_dir ~/Datasets/UCF_101/processed_fps_1_res18 --run_name res18_1fps_lyr_1_bs_256_lr_1e4 \
---num_layers 1 --batch_size 256 --epochs 300 --gpu_id 1 --opt_lvl 1  --num_workers 4 --lr 1e-4
+--num_layers 1 --batch_size 256 --epochs 300 --gpu_id 1 --opt_lvl 1  --num_workers 4 --lr 1e-4 
 """
 
 
@@ -78,6 +78,10 @@ def main():
     parser.add_argument('--val_size',       type=int,
                         help='validation set size for evaluating accuracy', default=2000)
     parser.add_argument('--use_val',        type=str2bool,
+                        help='use validation set & metrics', default='true')
+    parser.add_argument('--test_size',       type=int,
+                        help='validation set size for evaluating accuracy', default=2000)
+    parser.add_argument('--use_test',        type=str2bool,
                         help='use validation set & metrics', default='true')
 
     # GPU params
@@ -297,26 +301,81 @@ def main():
 
     # TODO: Test/Inference
     elif args.mode == 'test':
+        # Setup train log directory
+        log_dir = os.path.join(args.expt_dir, args.expt_name, args.run_name)
+
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
+        print('Training Log Directory: {}\n'.format(log_dir))
+
+        # TensorBoard summaries setup  -->  /expt_dir/expt_name/run_name/
+        writer = SummaryWriter(log_dir)
+
+        # Train log file
+        log_file = setup_logs_file(parser, log_dir)
 
         # Dataset & Dataloader
         dataset_configs, Dataset = init_dataset_configs(args.model, args)
 
-        test_dataset = Dataset(os.path.join(args.data_dir, 'test.json'),
-                               os.path.join(args.data_dir, 'test.npy'),
-                               **dataset_configs)
+        train_dataset = Dataset(os.path.join(args.data_dir, 'train.json'),
+                                os.path.join(args.data_dir, 'train.npy'),
+                                **dataset_configs)
 
-        test_loader = DataLoader(
-            test_dataset, batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers)
+        train_loader = DataLoader(
+            train_dataset, batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers)
 
-        # Total Test set size
-        test_total_size = test_dataset.__len__()
-        log_msg = 'Train Data Size: {}\n'.format(test_dataset.__len__())
+        log_msg = 'Train Data Size: {}\n'.format(train_dataset.__len__())
+        print_and_log(log_msg, log_file)
 
-        # Min of the total & subset size
-        test_size = min(test_total_size, args.val_size)
-        log_msg += 'Test Accuracy is computed using {} samples. See --val_size\n'.format(
-            test_size)
-        print(log_msg)
+        # Configs inferred from dataset
+        input_dim = train_dataset.embedding_dim
+        max_video_len = train_dataset.max_video_len
+
+        if args.use_val:
+            # Use the same max video length as in the training dataset
+            dataset_configs['max_video_len'] = max_video_len
+
+            val_dataset = Dataset(os.path.join(args.data_dir, 'val.json'),
+                                  os.path.join(args.data_dir, 'val.npy'),
+                                  **dataset_configs)
+
+            val_loader = DataLoader(
+                val_dataset, batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers)
+
+            # Total validation set size
+            val_total_size = val_dataset.__len__()
+            log_msg = 'Validation Data Size: {}\n'.format(val_total_size)
+
+            # Min of the total & subset size
+            val_size = min(val_total_size, args.val_size)
+            log_msg += 'Validation Accuracy is computed using {} samples. See --val_size\n'.format(
+                val_size)
+
+            print_and_log(log_msg, log_file)
+
+        if args.use_test:
+
+            # Use the same max video length as in the training dataset
+            dataset_configs['max_video_len'] = max_video_len
+
+            test_dataset = Dataset(os.path.join(args.data_dir, 'test.json'),
+                                   os.path.join(args.data_dir, 'test.npy'),
+                                   **dataset_configs)
+
+            test_loader = DataLoader(
+                test_dataset, batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers)
+
+            # Total test set size
+            test_total_size = test_dataset.__len__()
+            log_msg = 'Test Data Size: {}\n'.format(test_total_size)
+
+            # Min of the total & subset size
+            test_size = min(test_total_size, args.test_size)
+            log_msg += 'Test Accuracy is computed using {} samples. See --test_size\n'.format(
+                test_size)
+
+            print_and_log(log_msg, log_file)
 
         # Build Model
         model_configs, Model = init_model_configs(
@@ -327,12 +386,36 @@ def main():
 
         # Loss & Optimizer
         criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr)
+
+        model, optimizer = amp.initialize(
+            model, optimizer, opt_level="O{}".format(args.opt_lvl))
 
         # Step & Epoch
         start_epoch = 1
         curr_step = 1
+        # Load model checkpoint file (if specified) from `log_dir`
+        if args.model_ckpt:
+            model_ckpt_path = os.path.join(log_dir, args.model_ckpt)
+            checkpoint = torch.load(model_ckpt_path)
 
-        steps_per_epoch = len(test_loader)
+            # Load model & optimizer
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            # Load other info
+            curr_step = checkpoint['curr_step']
+            start_epoch = checkpoint['epoch']
+            prev_loss = checkpoint['loss']
+
+            log_msg = 'Resuming Training...\n'
+            log_msg += 'Model successfully loaded from {}\n'.format(
+                model_ckpt_path)
+            log_msg += 'Training loss: {:2f} (from ckpt)\n'.format(prev_loss)
+
+            print_and_log(log_msg, log_file)
+
+        steps_per_epoch = len(train_loader)
         start_time = time()
 
         for epoch in range(start_epoch, start_epoch + n_epochs):
@@ -347,30 +430,56 @@ def main():
                 # Compute Loss
                 loss = criterion(label_logits, label)
 
+                # Backward Pass
+                optimizer.zero_grad()
+                # loss.backward()
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+
+                optimizer.step()
+
                 # Print Results - Loss value & Validation Accuracy
                 if curr_step % args.log_interval == 0 or curr_step == 1:
+                    # Validation set accuracy
+                    if args.use_val:
+                        validation_metrics = compute_validation_test_metrics(
+                            model, val_loader, device, val_size)
+
+                        # Reset the mode to training
+                        model.train()
+
+                        log_msg = 'Validation Accuracy: {:.2f} %  || Validation Loss: {:.4f}'.format(
+                            validation_metrics['accuracy'], validation_metrics['loss'])
+
+                        print_and_log(log_msg, log_file)
+
+                        # Add summaries to TensorBoard
+                        writer.add_scalar(
+                            'Val/Accuracy', validation_metrics['accuracy'], curr_step)
+                        writer.add_scalar(
+                            'Val/Loss', validation_metrics['loss'], curr_step)
 
                     # Test set accuracy
-                    test_metrics = compute_validation_test_metrics(
-                        model, test_loader, device, test_size)
+                    if args.use_test:
+                        test_metrics = compute_validation_test_metrics(
+                            model, test_loader, device, test_size)
 
-                    # # Reset the mode to training
-                    # model.train()
+                        # Reset the mode to training
+                        model.train()
 
-                    log_msg = 'Test Accuracy: {:.2f} %  || Test Loss: {:.4f}'.format(
-                        test_metrics['accuracy'], test_metrics['loss'])
+                        log_msg = 'Test Accuracy: {:.2f} %  || Test Loss: {:.4f}'.format(
+                            test_metrics['accuracy'], test_metrics['loss'])
 
-                    #print_and_log(log_msg, log_file)
-                    print(log_msg)
+                        print_and_log(log_msg, log_file)
+
+                        # Add summaries to TensorBoard
+                        writer.add_scalar(
+                            'Test/Accuracy', test_metrics['accuracy'], curr_step)
+                        writer.add_scalar(
+                            'Test/Loss', test_metrics['loss'], curr_step)
 
                     # Add summaries to TensorBoard
-                    writer.add_scalar(
-                        'Test/Accuracy', test_metrics['accuracy'], curr_step)
-                    writer.add_scalar(
-                        'Test/Loss', test_metrics['loss'], curr_step)
-
-                    # Add summaries to TensorBoard
-                    writer.add_scalar('Test/Loss', loss.item(), curr_step)
+                    writer.add_scalar('Train/Loss', loss.item(), curr_step)
 
                     # Compute elapsed & remaining time for training to complete
                     time_elapsed = (time() - start_time) / 3600
@@ -382,29 +491,60 @@ def main():
                     log_msg = 'Epoch [{}/{}], Step [{}/{}], Loss: {:.4f} | time elapsed: {:.2f}h | time left: {:.2f}h'.format(
                         epoch, n_epochs, curr_step, steps_per_epoch, loss.item(), time_elapsed, time_left)
 
-                    #print_and_log(log_msg, log_file)
-                    print(log_msg)
+                    print_and_log(log_msg, log_file)
 
-                # # Save the model
-                # if curr_step % args.save_interval == 0:
-                #     save_path = os.path.join(
-                #         log_dir, 'model_' + str(curr_step) + '.pth')
+                # Save the model
+                if curr_step % args.save_interval == 0:
+                    save_path = os.path.join(
+                        log_dir, 'model_' + str(curr_step) + '.pth')
 
-                #     state_dict = {'model_state_dict': model.state_dict(),
-                #                   'optimizer_state_dict': optimizer.state_dict(),
-                #                   'curr_step': curr_step, 'loss': loss, 'epoch': epoch}
+                    state_dict = {'model_state_dict': model.state_dict(),
+                                  'optimizer_state_dict': optimizer.state_dict(),
+                                  'curr_step': curr_step, 'loss': loss, 'epoch': epoch}
 
-                #     torch.save(state_dict, save_path)
-                #     # torch.save(model.state_dict(), save_path)
+                    torch.save(state_dict, save_path)
+                    # torch.save(model.state_dict(), save_path)
 
-                #     log_msg = 'Saving the model at the {} step to directory:{}'.format(
-                #         curr_step, log_dir)
-                #     print_and_log(log_msg, log_file)
+                    log_msg = 'Saving the model at the {} step to directory:{}'.format(
+                        curr_step, log_dir)
+                    print_and_log(log_msg, log_file)
 
                 curr_step += 1
 
-        # writer.close()
-        # log_file.close()
+            # Validation set accuracy on the entire set
+            if args.use_val:
+                # Total validation set size
+                total_validation_size = val_dataset.__len__()
+                validation_metrics = compute_validation_test_metrics(
+                    model, val_loader, device, total_validation_size)
+
+                log_msg = '\nAfter {} epoch:\n'.format(epoch)
+                log_msg += 'Validation Accuracy: {:.2f} %  || Validation Loss: {:.4f}\n'.format(
+                    validation_metrics['accuracy'], validation_metrics['loss'])
+
+                print_and_log(log_msg, log_file)
+
+                # Reset the mode to training
+                model.train()
+
+            # Test set accuracy on the entire set
+            if args.use_test:
+                # Total validation set size
+                total_test_size = test_dataset.__len__()
+                test_metrics = compute_validation_test_metrics(
+                    model, test_loader, device, total_test_size)
+
+                log_msg = '\nAfter {} epoch:\n'.format(epoch)
+                log_msg += 'Test Accuracy: {:.2f} %  || Test Loss: {:.4f}\n'.format(
+                    test_metrics['accuracy'], test_metrics['loss'])
+
+                print_and_log(log_msg, log_file)
+
+                # Reset the mode to training
+                model.train()
+
+        writer.close()
+        log_file.close()
 
 
 def init_dataset_configs(model_name, args):

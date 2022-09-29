@@ -41,7 +41,7 @@ def _filename(path):
     return filename
 
 
-def train_val_test_split(label, video_dir, label_idx, split_ratio=0.6):
+def train_val_test_split(label, video_dir, label_idx, split_ratio=0.8):
     """
     For the given video class sub-directory, performs train-val split
     and computes filenames along with class label idx.
@@ -52,7 +52,7 @@ def train_val_test_split(label, video_dir, label_idx, split_ratio=0.6):
     :returns: train & validation lists containing
                 tuples of filenames & class idx
     """
-    split_ratio2 = 0.2  # modified
+    split_ratio2 = 0.1  # modified
     # Get all files in the given class directory
     paths = sorted(glob.glob(os.path.join(video_dir, label, '*.avi')))
 
