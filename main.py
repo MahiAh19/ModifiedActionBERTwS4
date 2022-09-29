@@ -3,6 +3,7 @@ import torch.nn as nn
 import argparse
 import os
 import apex.amp as amp
+import wandb
 from time import time
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
@@ -104,6 +105,23 @@ def main():
     # Set CUDA device
     torch.cuda.set_device(device)
     # torch.cuda.get_device_properties(device).total_memory  # in Bytes
+
+    # initialise weights and biases
+    wandb.init(
+        # Set the project where this run will be logged
+        project="S4_ActionBERT",
+        # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+        name=f"experiment_BERT",
+        entity="499_ratpack",
+        # Track hyperparameters and run metadata
+        config={
+            "learning_rate": 1e-4,
+            "architecture": "res18",
+            "dataset": "UCF-101",
+            "epochs": 300,
+            "batch_size": 256,
+            "num_layers": 1
+        })
 
     # Train params
     n_epochs = args.epochs
@@ -459,6 +477,11 @@ def main():
                         writer.add_scalar(
                             'Val/Loss', validation_metrics['loss'], curr_step)
 
+                        # W&B
+                        wandb.log(
+                            {"Val/Accuracy": validation_metrics['accuracy']})
+                        wandb.log({"Val/loss": validation_metrics['loss']})
+
                     # Test set accuracy
                     if args.use_test:
                         test_metrics = compute_validation_test_metrics(
@@ -477,6 +500,10 @@ def main():
                             'Test/Accuracy', test_metrics['accuracy'], curr_step)
                         writer.add_scalar(
                             'Test/Loss', test_metrics['loss'], curr_step)
+
+                        # W&B
+                        wandb.log({"Test/Accuracy": test_metrics['accuracy']})
+                        wandb.log({"Test/loss": test_metrics['loss']})
 
                     # Add summaries to TensorBoard
                     writer.add_scalar('Train/Loss', loss.item(), curr_step)
