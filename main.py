@@ -609,7 +609,7 @@ def init_model_configs(model_name, args, input_dim, max_video_len):
                   'd_input': input_dim,
                   'd_output': args.num_cls,
                   'd_model': 256,
-                  'n_layers': 4,
+                  'n_layers': args.num_layers,
                   'dropout': 0.2,
                   'prenorm': True}
         Model = MyS4
