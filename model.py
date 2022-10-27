@@ -7,6 +7,7 @@ from torch.nn.utils.rnn import pack_padded_sequence
 from configs import load_model, load_embedding_fn
 
 from src.models.s4.s4d import S4D
+from sashimi.sashimi import Sashimi
 
 # Dropout broke in PyTorch 1.11
 if tuple(map(int, torch.__version__.split('.')[:2])) == (1, 11):
@@ -16,6 +17,24 @@ if tuple(map(int, torch.__version__.split('.')[:2])) >= (1, 12):
     dropout_fn = nn.Dropout1d
 else:
     dropout_fn = nn.Dropout2d
+
+
+class MySashimi(nn.Module):
+    def __init__(self, model_params, device=None):
+
+        super().__init__()
+
+        d_input = model_params['d_input']
+        d_output = model_params['d_output']
+        prenorm = model_params['prenorm']
+
+        # Linear encoder (d_input = 1 for grayscale and 3 for RGB)
+        self.encoder = nn.Linear(d_input, d_model)
+
+        Sashimi()
+
+        # Linear decoder
+        self.decoder = nn.Linear(d_model, d_output)
 
 
 class MyS4(nn.Module):

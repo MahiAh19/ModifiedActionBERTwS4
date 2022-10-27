@@ -12,8 +12,8 @@ from utils import str2bool, print_and_log, setup_logs_file
 from utils import compute_validation_test_metrics
 
 
-from model import BiLSTM, Transformer, MyS4
-print(MyS4)
+from model import BiLSTM, Transformer, MyS4, MySashimi
+print(MySashimi)
 
 """
 Train + Val:
@@ -601,8 +601,15 @@ def init_model_configs(model_name, args, input_dim, max_video_len):
     :param model_name: e.g. bilstm, bert, mys4
     :return: config dict & model class
     """
+    if model_name == 'mySashimi':
+        config = {'model_name': model_name,
+                  'max_video_len': max_video_len,
+                  'd_input': input_dim,
+                  'd_output': args.num_cls,
+                  'prenorm': True}
+        Model = MySashimi
 
-    if model_name == 'mys4':
+    elif model_name == 'mys4':
         config = {'lr': args.lr,
                   'model_name': model_name,
                   'max_video_len': max_video_len,
